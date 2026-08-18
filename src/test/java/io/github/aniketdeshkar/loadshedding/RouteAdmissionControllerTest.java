@@ -16,7 +16,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
+@Timeout(10)
 class RouteAdmissionControllerTest {
   private static final Clock CLOCK = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC);
   private static final Instant DEADLINE = Instant.EPOCH.plusSeconds(10);
@@ -40,12 +42,16 @@ class RouteAdmissionControllerTest {
                       }));
       assertTrue(started.await(1, TimeUnit.SECONDS));
       var second = executor.submit(() -> controller.execute(DEADLINE, () -> "second"));
-      for (int i = 0; i < 1000 && controller.queued() == 0; i++) Thread.onSpinWait();
-      var error =
-          assertThrows(LoadShedException.class, () -> controller.execute(DEADLINE, () -> "third"));
-      assertEquals(RejectionReason.SATURATED, error.reason());
-      assertEquals(Duration.ofSeconds(3), error.retryAfter());
-      release.countDown();
+      try {
+        awaitQueued(controller);
+        var error =
+            assertThrows(
+                LoadShedException.class, () -> controller.execute(DEADLINE, () -> "third"));
+        assertEquals(RejectionReason.SATURATED, error.reason());
+        assertEquals(Duration.ofSeconds(3), error.retryAfter());
+      } finally {
+        release.countDown();
+      }
       assertEquals("first", first.get());
       assertEquals("second", second.get());
     }
@@ -68,10 +74,13 @@ class RouteAdmissionControllerTest {
                         return true;
                       }));
       started.await();
-      var error =
-          assertThrows(LoadShedException.class, () -> controller.execute(DEADLINE, () -> false));
-      assertEquals(RejectionReason.QUEUE_TIMEOUT, error.reason());
-      release.countDown();
+      try {
+        var error =
+            assertThrows(LoadShedException.class, () -> controller.execute(DEADLINE, () -> false));
+        assertEquals(RejectionReason.QUEUE_TIMEOUT, error.reason());
+      } finally {
+        release.countDown();
+      }
       holder.get();
     }
   }
@@ -180,6 +189,12 @@ class RouteAdmissionControllerTest {
   private static RouteAdmissionController controller(RoutePolicy policy) {
     return new RouteAdmissionController(
         "route", policy, CLOCK, DependencyHealth.alwaysHealthy(), SheddingMetrics.noOp());
+  }
+
+  private static void awaitQueued(RouteAdmissionController controller) throws InterruptedException {
+    long deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+    while (controller.queued() == 0 && System.nanoTime() < deadline) Thread.sleep(1);
+    assertEquals(1, controller.queued());
   }
 
   private static void await(CountDownLatch latch) {
