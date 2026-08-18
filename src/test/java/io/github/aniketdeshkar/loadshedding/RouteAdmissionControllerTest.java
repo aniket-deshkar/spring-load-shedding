@@ -154,6 +154,7 @@ class RouteAdmissionControllerTest {
     var active = new AtomicInteger();
     var maximum = new AtomicInteger();
     var release = new CountDownLatch(1);
+    var entered = new CountDownLatch(3);
     try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
       var tasks = new ArrayList<java.util.concurrent.Future<Integer>>();
       for (int i = 0; i < 20; i++)
@@ -165,12 +166,16 @@ class RouteAdmissionControllerTest {
                         () -> {
                           int current = active.incrementAndGet();
                           maximum.accumulateAndGet(current, Math::max);
+                          entered.countDown();
                           await(release);
                           active.decrementAndGet();
                           return current;
                         })));
-      for (int i = 0; i < 1000 && controller.active() < 3; i++) Thread.onSpinWait();
-      release.countDown();
+      try {
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+      } finally {
+        release.countDown();
+      }
       for (var task : tasks) task.get();
     }
     assertEquals(3, maximum.get());
